@@ -1,0 +1,18 @@
+config:
+  bind: 0.0.0.0:{{PORT}}
+  onlineMode: false
+  servers:
+    backend: 127.0.0.1:{{PORT}}
+  try:
+    - backend
+  status:
+    motd: |
+      §aThis server is offline, Please wait.
+    showMaxPlayers: 1
+  lite:
+    enabled: false
+    fallback:
+      motd: "§aThis server is offline, Please wait."
+      version:
+        name: '§aStarting...'
+        protocol: -1
