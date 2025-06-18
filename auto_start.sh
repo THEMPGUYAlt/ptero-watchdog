@@ -1,39 +1,42 @@
 #!/bin/bash
 
-# Load environment
 ENV_FILE=".env"
 if [[ -f "$ENV_FILE" ]]; then
   export $(grep -v '^#' "$ENV_FILE" | xargs)
 else
-  echo ".env file not found!"
+  echo ".env file missing!"
   exit 1
 fi
 
-UUIDS=($SERVER_UUIDS)  # Space-separated UUIDs
 LOCK_DIR="/tmp/ptero-autostart"
 mkdir -p "$LOCK_DIR"
 
-get_status() {
-  local uuid="$1"
+get_all_servers() {
   curl -s -H "Authorization: Bearer $API_KEY" \
-       "$PANEL_URL/api/application/servers/$uuid/utilization" |
-       jq -r '.attributes.state'
+    "$PANEL_URL/api/application/servers" |
+    jq -c '.data[] | {uuid: .attributes.uuid, id: .attributes.id}'
+}
+
+get_status() {
+  local sid="$1"
+  curl -s -H "Authorization: Bearer $API_KEY" \
+    "$PANEL_URL/api/application/servers/$sid/utilization" |
+    jq -r '.attributes.state'
 }
 
 get_port() {
-  local uuid="$1"
+  local sid="$1"
   curl -s -H "Authorization: Bearer $API_KEY" \
-       "$PANEL_URL/api/application/servers/$uuid" |
-       jq -r '.attributes.allocation | .port'
+    "$PANEL_URL/api/application/servers/$sid" |
+    jq -r '.attributes.allocation.port'
 }
 
 start_server() {
-  local uuid="$1"
+  local sid="$1"
   curl -s -X POST -H "Authorization: Bearer $API_KEY" \
-       -H "Content-Type: application/json" \
-       -d '{"signal": "start"}' \
-       "$PANEL_URL/api/application/servers/$uuid/power"
-  echo "[MC $uuid] Start triggered"
+    -H "Content-Type: application/json" \
+    -d '{"signal":"start"}' \
+    "$PANEL_URL/api/application/servers/$sid/power"
 }
 
 start_gate() {
@@ -61,40 +64,41 @@ stop_gate() {
 
 watchdog() {
   local uuid="$1"
-  local port
-  port=$(get_port "$uuid")
-  local last_shutdown=$(date +%s)
+  local sid="$2"
+  local port="$3"
   local cooldown=${MIN_OFFLINE:-600}
   local lock="$LOCK_DIR/$uuid.lock"
+  local last_shutdown=$(date +%s)
 
   while true; do
     local state
-    state=$(get_status "$uuid")
+    state=$(get_status "$sid")
 
     if [[ "$state" == "running" ]]; then
       stop_gate "$uuid"
-      while [[ "$(get_status "$uuid")" == "running" ]]; do
-        sleep 5
-      done
-      echo "[MC $uuid] Server stopped"
+      while [[ "$(get_status "$sid")" == "running" ]]; do sleep 5; done
+      echo "[MC $uuid] Stopped"
       last_shutdown=$(date +%s)
+
     elif [[ "$state" == "starting" ]]; then
       stop_gate "$uuid"
-      echo "[MC $uuid] Server is starting..."
+      echo "[MC $uuid] Starting..."
       sleep 5
+
     else
-      local now=$(date +%s)
-      local delta=$((now - last_shutdown))
+      now=$(date +%s)
+      delta=$((now - last_shutdown))
 
       if (( delta < cooldown )); then
-        echo "[MC $uuid] Cooldown: $delta/$cooldown"
+        echo "[MC $uuid] Cooldown ($delta/$cooldown)"
       elif [[ ! -f "$lock" ]]; then
         touch "$lock"
-        start_server "$uuid"
+        start_server "$sid"
+        echo "[MC $uuid] Start triggered"
         sleep 10
         rm -f "$lock"
       else
-        echo "[MC $uuid] Waiting — already starting"
+        echo "[MC $uuid] Waiting"
       fi
 
       start_gate "$uuid" "$port"
@@ -103,8 +107,20 @@ watchdog() {
   done
 }
 
-for uuid in "${UUIDS[@]}"; do
-  watchdog "$uuid" &
-done
+main() {
+  get_all_servers | while read -r line; do
+    uuid=$(echo "$line" | jq -r '.uuid')
+    sid=$(echo "$line" | jq -r '.id')
+    port=$(get_port "$sid")
 
-wait
+    if [[ -z "$port" ]]; then
+      echo "[WARN] Skipping $uuid — no port"
+      continue
+    fi
+
+    watchdog "$uuid" "$sid" "$port" &
+  done
+  wait
+}
+
+main
